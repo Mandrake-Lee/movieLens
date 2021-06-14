@@ -1,0 +1,362 @@
+---
+title: "The movieLens recommendation system"
+author: "Jorge Amorós-Argos"
+date: "14/6/2021"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+  html_document:
+    df_print: paged
+    number_sections: true
+urlcolor: blue 
+toccolor: 'gray'  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+library(tidyverse)
+dataFile <- file.path(getwd(),"rda","moviePredictor.rda")
+load(dataFile)
+
+# Loading the training set
+edx <- file.path(getwd(),"rda","edx.rda")
+load(edx)
+```
+
+# Introduction
+As a wrap up exercise of the _Data Science_ course, the direction has challenged alumni to train a recommendation system in order to predict movie afinities for a given user.
+
+Such a system is at present time very common; we can all think our daily experience with streaming platforms like Netflix.
+
+Ideally, if the system is fed with a user liking i.e. give ratings to different movies, then it can advise of other movies of our taste based on the community.
+
+## Data
+### Resources
+We'd like to thank [_grouplens_](https://grouplens.org/) for their project [movielens](https://movielens.org/), which is a website that helps you find movies you may like.
+
+Basically they keep available a database of movies and user ratings.
+
+Since the data and computing time can be very high, the direction has chosen a subset of 10 million entries, available at the following  [link](http://files.grouplens.org/datasets/movielens/ml-10m.zip)
+
+### Cleaning the data
+The script to download and suit the data to R is already given.
+
+However, we can read through the code and make the following explanation:
+
+1. Original data is stored in 2 files:
+
+Filename|Content
+---|---
+movies.dat|It's a database for each movie, holding the movieId, title, genre...
+ratings.dat|This is the database of the reviews, connecting userId->movieId->rating
+
+2. The data is ascii delimited with "::" and for each file, has a constant number of columns. Both objects are imported to R
+3. At the end, a single dataframe is produced, combining both previous objects. We can see _ratings.dat_ as the master file, complementary information for the movies is done via _left_join_ command on _movies.dat_
+
+#### Train and test set
+
+To prepare our recommendation system, the previous single dataframe must be split into a train and a test set, i.e. 2 dataframes.
+
+We will use 10% of available data for test.
+
+This can be easily done in R via _createDataPartition_
+
+**Warning** The partition function doesn't care about the simultaneous presence of the same movies and users on both train and test set.
+
+In other words, if no action is done, the test set will probably fail as some users and movies haven't been detected during the training phase.
+
+Therefore, we must manually drop those entries of the validation that are not in the train set. We can reuse these "rejected" for train purposes though.
+
+The following code will do the trick:
+
+    # Make sure userId and movieId in validation set are also in edx set
+    validation <- temp %>% 
+      semi_join(edx, by = "movieId") %>%
+      semi_join(edx, by = "userId")
+
+    # Add rows removed from validation set back into edx set
+    removed <- anti_join(temp, validation)
+    edx <- rbind(edx, removed)
+
+### Structure of data
+As an outcome of previous point, there will be 2 datasets aimed for different purposes:
+
+|Name      | Purpose|
+|----------|--------|
+|edx|training|
+|validation|testing|
+
+Inside each dataset, there're 6 fields (columns)
+
+Field    | Description
+---------|---
+userId|Numerical, user that inputs the rating
+movieId|Numerical, serial number of the movie given by the website
+rating|Numerical, from 0 to 5, the user opinion/score for that movie
+timestamp|Date when the user entered the review
+title|Char, the name of the movie
+genres|Char, category given for that movie e.g Action, Drama, Action|Drama, etc
+
+
+Please note that the R script attached to this report needs the files above to be available in a subdirectory _/rda_, properly named as _edx.rda_ and _validation.rda_. Otherwise, the script won't work.
+
+
+## Goal
+The purpose of this exercise is to define and build the most accurate movie recommendation system.
+
+Such a system will help any future user, based on his reviews, to find products of his taste.
+
+To reach it, we will train and check the RMSE (accuracy) of the system by trying different models of growing complexity as seen in the course.
+
+
+# Methods & analysis
+## The model theory
+Directly taken from the [course](https://rafalab.github.io/dsbook/large-datasets.html#recommendation-systems), the model that we will use for prediction will have several layers of complexity in order to reach a satisfactory accuracy.
+
+Broadly speaking, the model will grow as follows:
+
+1. $Y_{u, i} = \hat{\mu}+\epsilon_{u, i}$
+2. $Y_{u, i} = \hat{\mu} + \hat{b}_{i} + \hat{b}_{u} + \epsilon_{u, i}$
+3. $Y_{u, i} = \hat{\mu} + \hat{b}_{i} + \hat{b}_{u} + \hat{\beta_g}+\epsilon_{u, i}$
+
+### Loss function
+In order to evaluate the accuracy of the predictions, the RMSE of the errors will be used:
+$$\mbox{RMSE} = \sqrt{\frac{1}{N} \sum_{u,i}^{} \left( \hat{y}_{u,i} - y_{u,i} \right)^2 }$$
+Needless to say that the final accuracy must be evaluated in the *test* set, not the training one.
+
+## Exploring the data
+We need to get familiar with the data. This will help us to choose the best model and also to explain possible mismatches.
+
+*Note: we will always use the train set in the analysis shown here unless stated*
+
+Let's first plot some features:
+```{r, echo=FALSE}
+#Plotting histogram of number of reviews per movie
+edx %>% group_by(movieId) %>%
+      summarise(reviews=n()) %>%
+      ggplot(aes(x=reviews)) + geom_histogram() +        scale_y_log10()+ scale_x_log10() +
+      ggtitle("Histogram: number reviews per movie")
+
+#Plotting histogram of number of reviews per user
+edx %>% group_by(userId) %>%
+      summarise(reviews=n()) %>%
+      ggplot(aes(x=reviews)) + geom_histogram() +        scale_y_log10()+ scale_x_log10()+
+      ggtitle("Histogram: number reviews per user")
+```
+
+We can see that many movies only have 1 review. This will cause issues as the rating is not averaged/counter checked with other users and therefore can be biased. This will lead us to the _regularization_ step.
+
+Also, most of the users are very cooperative and have rated more than 10. In average 128 reviews, which is a lot.
+```{r}
+edx %>% group_by(userId) %>%
+      summarise(reviews=n()) %>%
+      pull(reviews) %>%
+      mean()
+```
+
+Last not least, let's plot the rating per genre
+For this purpose, we will do a scatter plot of the standard deviation vs average grouped by popular genres, we get the following plot^[The genre data is in fact a composite of different genre tags. In order to simplify the problem, we're considering each combination as a unique tag. Also, only very very rated genres are considered.]:
+```{r, fig.align='center'}
+# Plot average vs std dev for popular (>1000) ratings
+edx %>% group_by(genres) %>%
+          summarise(count=n(),avg=mean(rating),stdev=sd(rating)) %>%
+          filter(count>1000) %>%
+          ggplot(aes(x=avg, y= stdev))+
+  geom_point()+
+  ggtitle("Scatterplot: stdev vs avg per genre")
+```
+
+We could infere:
+
+* Some genres are clearly better rated, with less variability than others
+* There's a bias of the rating per genre
+
+### The genre approach
+It is really challenging to deal with the genre information.
+
+To start with, each movie has a combination of basic tags. We had to reconstruct them from the data set and they are 20.
+
+We can list each tag (category) and the frequency of appearance in descending order:
+
+```{r}
+knitr::kable(t(sort(genre_means, decreasing=TRUE)), col.names = c("Mean"))
+```
+
+We can also know the frequency of tag combos i.e. how many tags are used per movie genre classification. The following histogram will be enlighting:
+
+```{r}
+# These are the most common tag combos
+barplot(table(genre_combos),
+        main="Histogram: number of tags combined in genre field",
+        xlab="Number of tags combined",
+        ylab="Movies")
+```
+We can see that the most common combinations are with 1 and 2 tags (72%).
+```{r, fig.align='center'}
+genre_combos %>%
+            group_by(combos) %>%
+            summarise(count=n()) %>%
+            mutate(cum=cumsum(count), cum_p=cum/sum(count)) %>%
+            ggplot(aes(x=combos, y=cum_p))+
+            geom_line()+ geom_point()+
+            ggtitle(label="Cumulative percentage of number of combos")
+```
+
+We could think of using for the model only a combination of 2 tags for the genre, ignoring the rest of the combinations.
+
+This could represent an overload of programming since we must best sort each movie according only 2 tags.
+
+However, we have discarded this idea because the genre is giving little information in the end. See the [this discussion](#genre_analysis)
+
+**The genre approach will consider each combination unique, not to be reduced to the basic tags**
+
+## Model approach
+We will compute the error for each complexity as shown before and make a final evaluation.
+
+### Mean
+The model taking mean as the only estimator is as follows:
+
+$$Y_{u, i} = \hat{\mu}+\epsilon_{u, i}$$
+
+### Movie & user bias
+If the add to the model before the effect of the movie and user bias, the prediction model is as follows:
+
+$$Y_{u, i} = \hat{\mu} + \hat{b}_{i} + \hat{b}_{u} + \epsilon_{u, i}$$
+
+The _per movie_ and _per user_ estimates are affected by a regularization parameter $\lambda$ as:
+$$\hat{b}_{i}(\lambda) = \frac{1}{\lambda+n_i}\sum_{u=1}^{n_i}(Y_{u, i} - \hat{\mu})$$
+
+$$\hat{b}_{u}(\lambda) = \frac{1}{\lambda+n_u}\sum_{i=1}^{n_u}(Y_{u, i} - \hat{\mu}-\hat{b_i})$$
+This _regularization_ is needed because many movies are reviewed (rated) only once; therefore, it is not averaged with other users and therefore can be biased.
+
+Because of the huge dataset processed, we have divided the _regularization_ $\lambda$ solution into two loops:
+
+1. Coarse grid of 1, ranging from 0 to 10
+2. Fine grid of 0.1, ranging ±1 around estimated solution above
+
+#### Genre bias
+A further refinement, after the data exploration that we have shown before, is to consider a new parameter $\beta_g$ that reflects the genre of the movie.
+This will affect the predicted rating as follows:
+
+$$Y_{u, i} = \hat{\mu} + \hat{b}_{i} + \hat{b}_{u} + \hat{\beta}_{g} + \epsilon_{u, i}$$
+
+Obviously, this can only happen if the genre has been evaluated with the training set, otherwise must be considered $0$
+
+The variable is calculated after grouping _per genre_:
+
+$$\hat{\beta_g}=\sum_{i=1}^{n_g}(Y_{u, i} - \hat{\mu}-\hat{b_i}-\hat{b_u})$$
+
+# Results
+## Training the system
+It's worth stating again the procedure:
+
+1. With the train set:
+  + Calculate $\hat{\mu}$
+  + Find $\lambda_{opt}$ that minimizes the equation
+  + Once $\lambda_{opt}$ is found, $\hat{b_i}$ and $\hat{b_u}$ are defined
+  + With all variables above defined, we can easily estimate $\hat{\beta_g}$
+2. With $\hat{\mu}$, $\hat{b_i}$, $\hat{b_u}$ and $\hat{\beta_g}$ from above point, compute the RMSE with the **test** set.
+3. We will prepare a breakdow of the RMSE per model and choose the best
+
+### Computing $\hat{\mu}$
+It is straight forward to compute the $\hat{\mu}$ as it is the mean of the ratings.
+```{r, echo=TRUE}
+mean(edx$rating)
+```
+
+### Computing $\lambda_{opt}$
+With computing resources in mind, we have divided the solving into 2 loops
+
+#### First loop
+The grid is chosen randomly from 0 to 10 with a step of 1.
+After visual inspection, the minimum must be between 0 and 2.
+
+```{r Loop1}
+plot(x=lambdas1, y=rmses1)
+```
+
+#### Second loop
+Refining the grid to a step of 0.1 in the range determined in the first loop. Here's the result of the graph and also the optimal values found:
+
+```{r Loop2}
+plot(x=lambdas2, y=rmses2)
+```
+```{r, echo=TRUE}
+rmse_opt
+lambda_opt
+```
+
+### Computing $\hat{\beta_g}$
+Once determined the previous variables, it is immediate to calculate $\hat{\beta_g}$ if the data is grouped by genres.
+
+### Validation of the model: RMSE
+Therefore, taking all the parameters from the train set, we will compute the RMSE with the *test* set:
+```{r}
+rmse_results %>% knitr::kable()
+```
+
+# Conclusion
+## The best model
+
+As the refinement of the model grows, so it does the accuracy of the predictions.
+
+Therefore the best model includes movie, user and genre bias:
+
+$$Y_{u, i} = \hat{\mu} + \hat{b}_{i} + \hat{b}_{u} + \hat{\beta}_{g} + \epsilon_{u, i}$$
+
+## Critical thinking: diving into genre bias $\hat{\beta}_{g}$ {#genre_analysis}
+It's worth noting that each refinement introduces less benefit and we could reach the point that the computing time doesn't pay off.
+
+In particular, we're curious about the genre bias.
+
+Let's get some insight of the $\hat{\beta}_{g}$ constants with a boxplot:
+```{r, fig.align='center'}
+boxplot(beta_hat$beta_hat,ylab="beta", main="Beta boxplot")
+```
+
+```{r, echo=TRUE}
+range(beta_hat$beta_hat)
+```
+
+So in the extreme cases, only $\pm0.11$ of the rating will be affected, in many most cases less than that.
+
+
+*What happened to our assumption that the genre had a considerable weight?*
+
+
+We graph now the same scatter plot but for the residuals after an estimation with $\hat{\mu} + \hat{b}_{i} + \hat{b}_{u}$
+```{r, echo=FALSE}
+# Explore if the genre is a trend *AFTER* movie & user prediction model
+
+# Considering mean, movie & user
+edx %>%
+  select(-timestamp, -title) %>%
+  left_join(b_i_hat, by= "movieId") %>%
+  left_join(b_u_hat, by= "userId") %>%
+  mutate(res=rating-(mu_hat+b_i_hat+b_u_hat)) %>%
+  group_by(genres) %>%
+  summarise(count=n(),avg=mean(res),stdev=sd(res)) %>%
+  filter(count>1000) %>%
+  ggplot(aes(x=avg, y= stdev)) + geom_point()+
+  ggtitle("Residuals after mean & movie & user model per genre")
+
+# Freeing the memory
+rm(edx)
+```
+We can see now that after the adjustment, the trend vanishes being now rounded and centered on $0$.
+
+### Explanation
+What has happened? The trend that we detected at first stage is real, however we can argue that *the genre is something that is intrinsic with the movie* and therefore is already estimated with $\hat{b}_{i}$. Also a given user may consume and rate mostly a certain kind of genre therefore $\hat{b}_{u}$ is somehow detecting some genre bias.
+
+In the end, all the significant information has already been captured before $\hat{\beta}_{g}$.
+
+In our opinion, this estimator could be dropped as it is arguably useful.
+
+## Future work
+There could be other variables that could refine the prediction but those need exploration and final checking. To point out out a few:
+
+* Check genre tags as predictors: decompose each genre into it's a combination of basic tags and treat them as predictors as seen in _machine learning_ course
+
+* Check if _timestamp_ of the ratings define the user: maybe night owl users are more cranky than early birds?
