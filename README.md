@@ -1,6 +1,7 @@
 # movieLens
 Exercise as capstone for the Data Science course (HarvardX PH125.9x).
 Written entirely in R.
+
 Prerequisites:
 * A subfolder /rda
 * **IMPORTANT**. Data files stored in /rda. These are downloaded and cleaned via a script provided by the course, so that script is not included here. Therefore in this folder we expect edx.rda & validation.rda to be present.
